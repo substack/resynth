@@ -6,33 +6,34 @@ import Synthesizer.Plain.Play (monoToInt16)
 
 import Foreign (Ptr, Storable, mallocArray, peekArray)
 import Control.Applicative ((<$>))
-import Control.Monad (forever, unless, when, forM_)
+import Control.Monad (forever, unless, when, mapM_)
 import Data.Array (listArray)
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.Chan
+import Control.Concurrent.MVar
+
+type Frequency = Double
+type Volume = Double
+type MicState = (Frequency,Volume)
 
 main :: IO ()
 main = do
-    fx <- mic 16000 2000
-    forM_ fx $ \(freq,volume) -> do
-        print (freq,volume)
-    
-    {-
-    when (volume > 0.3) $ do
-        forkIO $ playFreq 44100 0.1 freq
-        print (freq, volume)
-    -}
-
-mic :: Int -> Int -> IO [(Double,Double)]
-mic sampleRate samples = do
+    mv <- micThread 16000 1000
+    forever $ do
+        (freq,volume) <- readMVar mv
+        let
+            wave = sineWave rate 0.1 freq
+            rate = fromIntegral 44100
+        when (volume > 0.3)
+            $ monoToInt16 rate wave >> return ()
+ 
+micThread :: Int -> Int -> IO (MVar MicState)
+micThread sampleRate samples = do
     let
         source = alsaSoundSource "plughw:0,0" soundFormat
         soundFormat = SoundFmt sampleRate :: SoundFmt Double
     buf <- mallocArray samples
-    
-    -- spawn and populate a channel
-    chan <- newChan
+    mv <- newMVar (0,0)
     forkIO $ withSoundSource source $ \handle -> forever $ do
         n <- soundSourceRead source handle buf samples
         rawSound <- peekArray n buf
@@ -40,17 +41,10 @@ mic sampleRate samples = do
             volume = (sum $ map abs rawSound) / fromIntegral n
             hz' = pisarenko (listArray (0,n-1) rawSound)
             hz = hz' * 2.82e7 / fromIntegral sampleRate
-        unless (isNaN hz) $ writeChan chan (hz,volume)
-    
-    -- lazily read back everything from the channel
-    getChanContents chan
-
-playFreqs :: Int -> Double -> [Double] -> IO ()
-playFreqs sampleRate duration freqs =
-    monoToInt16 rate waves >> return ()
-    where
-        waves = concatMap (sineWave rate duration) freqs
-        rate = fromIntegral sampleRate
+        if isNaN hz
+            then swapMVar mv (0,0)
+            else swapMVar mv (hz,volume)
+    return mv
 
 sineWave :: Double -> Double -> Double -> [Double]
 sineWave rate duration freq = concat
